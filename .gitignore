@@ -1,0 +1,15 @@
+__pycache__
+.mscbackup
+ambrose_dataset
+Examples
+old
+model_checkpoints*
+smaller_dataset
+loss*
+generated_song*
+test*
+songs.npy
+songs_processed.npy
+data_processing_info.pkl
+notes*
+vocab_sizes.npy
