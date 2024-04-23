@@ -257,6 +257,7 @@ def convert_numbers_to_song(song):
 if __name__ == '__main__':
     # Process Dataset
     songs = process_dataset('./ambrose_dataset')
+    # songs = process_dataset('./smaller_dataset')
 
     songs = [dict_to_array(song[0]) for song in songs]
 

@@ -1,10 +1,11 @@
 import torch
 import numpy as np
-from midi_transformer import model
+from midi_transformer import *
 from simplify_midi import *
 import mido
 import pickle
 import time
+from helper import *
 
 def find_note_param_from_output(output):
     note_values = []
@@ -62,7 +63,8 @@ if __name__ == '__main__':
     note_data_tokenized = convert_song_to_numbers(note_data)
 
     first_few_notes = note_data_tokenized[:10]
-    checkpoint = 'model_checkpoints_2023-12-16-23-48-39/model_epoch_4_266_early_stop.pth'
+    # checkpoint = 'model_checkpoints_2024-04-09-13-37-10/model_epoch_100.pth'
+    checkpoint = get_most_recent_model_checkpoint()
     generated_song = generate_song(model, checkpoint, first_few_notes)
     convert_song = convert_generated_song_to_midi(generated_song, metadata)
 

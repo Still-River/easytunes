@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader, Dataset
 import torch.nn as nn
 
 from third_party import PositionalEncoding
+from helper import get_most_recent_model_checkpoint
 
 class TransformerModel(nn.Module):
     def __init__(self, d_model, nhead, num_encoder_layers, dim_feedforward, max_len, vocab_sizes, dropout=0):
@@ -106,12 +107,31 @@ class MIDIDataset(Dataset):
         duration_target = target_sequence[..., 2]
 
         padding_mask = torch.zeros(self.bptt, dtype=torch.bool)
+        padding_mask[pitch_input == 0] = True
 
         real_length = min(end - start, self.bptt)
         if real_length < self.bptt:
             padding_mask[real_length:] = True
 
         return pitch_input, delta_input, duration_input, pitch_target[-1], delta_target[-1], duration_target[-1], padding_mask
+    
+def collate_fn(batch):
+    batch = [item for item in batch if not item[6].all()]
+
+    if not batch:
+        return None
+
+    pitch_input = torch.stack([item[0] for item in batch])
+    delta_input = torch.stack([item[1] for item in batch])
+    duration_input = torch.stack([item[2] for item in batch])
+
+    pitch_target = torch.stack([item[3] for item in batch])
+    delta_target = torch.stack([item[4] for item in batch])
+    duration_target = torch.stack([item[5] for item in batch])
+
+    padding_mask = torch.stack([item[6] for item in batch])
+
+    return pitch_input, delta_input, duration_input, pitch_target, delta_target, duration_target, padding_mask
 
 def train(model, train_loader, criterion, optimizer, scheduler, epoch, device, loss_log_file='loss.csv', checkpoint_folder='model_checkpoints'):
     model.to(device)
@@ -121,6 +141,9 @@ def train(model, train_loader, criterion, optimizer, scheduler, epoch, device, l
     batch_index = 0
     for data in train_loader:
         try:
+            if data is None:
+                continue
+
             batch_index += 1
 
             pitch_input, delta_input, duration_input, pitch_target, delta_target, duration_target, padding_mask = [data_stream.to(device) for data_stream in data]
@@ -148,7 +171,7 @@ def train(model, train_loader, criterion, optimizer, scheduler, epoch, device, l
                 print(f'Epoch: {epoch:02d}, Batch: {batch_index:05d}/{len(train_loader)}, time elapsed: {elapsed:.2f}/{expected_remaining_time:.2f} Loss: {combined_loss.item():.4f}')
 
             
-            if batch_index % 100 == 0 or batch_index == 1:
+            if batch_index % 100 == 0:
                 with open(loss_log_file, 'a') as f:
                     f.write(f'{epoch},{batch_index},{combined_loss.item()}\n')
 
@@ -159,6 +182,9 @@ def train(model, train_loader, criterion, optimizer, scheduler, epoch, device, l
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
+                'model_hyperparameters': model_hyperparameters,
+                'train_load': train_loader,
+                'val_load': val_loader
             }, f'{checkpoint_folder}/model_epoch_{epoch}_{batch_index}_early_stop.pth')
             print(f'Saved model checkpoint: {checkpoint_folder}/model_epoch_{epoch}_{batch_index}_early_stop.pth')
             break
@@ -171,6 +197,9 @@ def evaluate(model, val_loader, criterion, device, epoch):
     total_loss = 0.
     batch_index = 0
     for data in val_loader:
+        if data is None:
+            continue
+
         batch_index += 1
 
         pitch_input, delta_input, duration_input, pitch_target, delta_target, duration_target, padding_mask = [data_stream.to(device) for data_stream in data]
@@ -216,31 +245,41 @@ val_data = data[split:]
 ################################### Model parameters ####################################
 #########################################################################################
 
-d_model = 2 ** 9
+d_model = 2 ** 8
 nhead = 8
-num_encoder_layers = 4
-dim_feedforward = 2 ** 10
-bptt = 100
+num_encoder_layers = 10
+dim_feedforward = 2 ** 12
+bptt = 32
 epochs = 100
 batch_size = 2 ** 9
+
+model_hyperparameters = {
+    'd_model': d_model,
+    'nhead': nhead,
+    'num_encoder_layers': num_encoder_layers,
+    'dim_feedforward': dim_feedforward,
+    'bptt': bptt,
+    'epochs': epochs,
+    'batch_size': batch_size,
+}
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 model = TransformerModel(d_model, nhead, num_encoder_layers, dim_feedforward, max_len, vocab_sizes).to(device)
 
-optimizer = torch.optim.Adam(model.parameters(), lr=0.00005)
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 5, gamma=0.99)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.0005,)
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 100, gamma=0.99)
 
 prev_checkpoint = None
-prev_checkpoint = 'model_checkpoints_2023-12-18-16-54-25/model_epoch_10.pth'
+# prev_checkpoint = get_most_recent_model_checkpoint()
 
 #########################################################################################
 
 train_dataset = MIDIDataset(train_data, bptt=bptt)
 val_dataset = MIDIDataset(val_data, bptt=bptt)
 
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True)
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
 
 criterion = nn.CrossEntropyLoss(ignore_index=0)
 
@@ -254,13 +293,28 @@ if __name__ == '__main__':
     if prev_checkpoint is not None:
         print('Loading model from checkpoint')
         checkpoint = torch.load(prev_checkpoint)
-        model.load_state_dict(checkpoint['model_state_dict'])
+
+        d_model = checkpoint['model_hyperparameters']['d_model']
+        nhead = checkpoint['model_hyperparameters']['nhead']
+        num_encoder_layers = checkpoint['model_hyperparameters']['num_encoder_layers']
+        dim_feedforward = checkpoint['model_hyperparameters']['dim_feedforward']
+        max_len = checkpoint['model_hyperparameters']['bptt']
+
+        model = TransformerModel(d_model, nhead, num_encoder_layers, dim_feedforward, max_len, vocab_sizes).to(device)
+
+        model.load_state_dict(checkpoint['model_state_dict'])   
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        train_loader = checkpoint['train_load']
+        val_loader = checkpoint['val_load']
 
     loss_log_file = f'loss-{date}.csv'
     with open(loss_log_file, 'w') as f:
         f.write('epoch,batch_index,loss\n')
+
+    training_log_file = f'training-{date}.log'
+    with open(training_log_file, 'w') as f:
+        f.write(f'epoch,train_loss,val_loss\n')
 
     for epoch in range(1, epochs + 1):
         train_loss = train(model, train_loader, criterion, optimizer, scheduler, epoch, device, loss_log_file, checkpoint_folder)
@@ -271,6 +325,12 @@ if __name__ == '__main__':
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler.state_dict(),
+            'model_hyperparameters': model_hyperparameters,
+            'train_load': train_loader,
+            'val_load': val_loader
         }, f'{checkpoint_folder}/model_epoch_{epoch}.pth')
+
+        with open(training_log_file, 'a') as f:
+            f.write(f'{epoch},{train_loss},{val_loss}\n')
 
         print(f'Epoch: {epoch:02d}, Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}')
